@@ -16,39 +16,34 @@ import HTMLEntities.Text qualified as HE
 import Web.Atomic.Html
 import Web.Atomic.Types
 
+renderLazyText :: (Monad m) => HtmlT m () -> m TL.Text
+renderLazyText = fmap TL.fromStrict . renderText
 
-renderLazyText :: Html () -> TL.Text
-renderLazyText = TL.fromStrict . renderText
+renderLazyByteString :: (Monad m) => HtmlT m () -> m BL.ByteString
+renderLazyByteString = fmap TLE.encodeUtf8 . renderLazyText
 
+renderText :: (Monad m) => HtmlT m () -> m Text
+renderText html = do
+  cs <- cssRulesLines <$> htmlCSSRules html
+  renderLines . addCss cs <$> htmlLines 2 html
+  where
+    addCss :: [Line] -> [Line] -> [Line]
+    addCss [] cnt = cnt
+    addCss cs cnt = do
+      styleLines cs <> (Line Newline 0 "" : cnt)
 
-renderLazyByteString :: Html () -> BL.ByteString
-renderLazyByteString = TLE.encodeUtf8 . renderLazyText
-
-
-renderText :: Html () -> Text
-renderText html =
-  let cs = cssRulesLines $ htmlCSSRules html
-   in renderLines $ addCss cs $ htmlLines 2 html
- where
-  addCss :: [Line] -> [Line] -> [Line]
-  addCss [] cnt = cnt
-  addCss cs cnt = do
-    styleLines cs <> (Line Newline 0 "" : cnt)
-
-
-htmlLines :: Int -> Html a -> [Line]
-htmlLines ind (Html _ ns) = nodesLines ind ns
-
+htmlLines :: (Monad m) => Int -> HtmlT m a -> m [Line]
+htmlLines ind html = do
+  (_, nodes) <- runHtmlT html
+  pure $ nodesLines ind nodes
 
 nodesLines :: Int -> [Node] -> [Line]
 nodesLines ind ns = mconcat $ fmap (nodeLines ind) ns
-
 
 nodeLines :: Int -> Node -> [Line]
 nodeLines ind (Elem e) = elementLines ind e
 nodeLines _ (Text t) = [Line Inline 0 $ HE.text t]
 nodeLines _ (Raw t) = [Line Newline 0 t]
-
 
 elementLines :: Int -> Element -> [Line]
 elementLines ind elm =
@@ -64,26 +59,24 @@ elementLines ind elm =
     children ->
       -- normal indented rendering
       mconcat
-        [ [line $ open <> renderAttributes (elementAttributes elm) <> ">"]
-        , fmap (addIndent ind) $ nodesLines ind children
-        , [line close]
+        [ [line $ open <> renderAttributes (elementAttributes elm) <> ">"],
+          fmap (addIndent ind) $ nodesLines ind children,
+          [line close]
         ]
- where
-  open = "<" <> elm.name
-  close = "</" <> elm.name <> ">"
+  where
+    open = "<" <> elm.name
+    close = "</" <> elm.name <> ">"
 
-  line t =
-    if elm.inline
-      then Line Inline 0 t
-      else Line Newline 0 t
-
+    line t =
+      if elm.inline
+        then Line Inline 0 t
+        else Line Newline 0 t
 
 -- Attributes ---------------------------------------------------
 
 -- | Element's attributes do not include class, which is separated. FlatAttributes generate the class attribute and include it
 newtype FlatAttributes = FlatAttributes (Map Name AttValue)
   deriving newtype (Eq)
-
 
 -- | The 'FlatAttributes' for an element, inclusive of class.
 elementAttributes :: Element -> FlatAttributes
@@ -92,31 +85,28 @@ elementAttributes e =
     addClasses
       (styleClass e)
       e.attributes
- where
-  addClasses :: AttValue -> Map Name AttValue -> Map Name AttValue
-  addClasses "" as = as
-  addClasses av as = M.insertWith (\a b -> a <> " " <> b) "class" av as
+  where
+    addClasses :: AttValue -> Map Name AttValue -> Map Name AttValue
+    addClasses "" as = as
+    addClasses av as = M.insertWith (\a b -> a <> " " <> b) "class" av as
 
-  styleClass :: Element -> AttValue
-  styleClass elm =
-    classesAttValue (elementClasses elm)
-
+    styleClass :: Element -> AttValue
+    styleClass elm =
+      classesAttValue (elementClasses elm)
 
 renderAttributes :: FlatAttributes -> Text
 renderAttributes (FlatAttributes m) =
   case m of
     [] -> ""
     as -> " " <> T.unwords (map htmlAtt $ M.toList as)
- where
-  htmlAtt (k, v) =
-    k <> "=" <> "'" <> HE.text v <> "'"
-
+  where
+    htmlAtt (k, v) =
+      k <> "=" <> "'" <> HE.text v <> "'"
 
 -- REnder CSS --------------------------------------------
 
 cssRulesLines :: Map Selector Rule -> [Line]
 cssRulesLines = mapMaybe cssRuleLine . M.elems
-
 
 cssRuleLine :: Rule -> Maybe Line
 cssRuleLine r | null r.properties = Nothing
@@ -125,23 +115,21 @@ cssRuleLine r =
       props = intercalate "; " (map renderProp r.properties)
       med = mconcat $ fmap mediaCriteria r.media
    in Just $ Line Newline 0 $ wrapMedia med $ sel <> " { " <> props <> " }"
- where
-  renderProp :: Declaration -> Text
-  renderProp ((Property p) :. cv) = p <> ":" <> renderStyle cv
+  where
+    renderProp :: Declaration -> Text
+    renderProp ((Property p) :. cv) = p <> ":" <> renderStyle cv
 
-  renderStyle :: Style -> Text
-  renderStyle (Style v) = pack v
-
+    renderStyle :: Style -> Text
+    renderStyle (Style v) = pack v
 
 wrapMedia :: MediaQuery -> Text -> Text
 wrapMedia [] cnt = cnt
 wrapMedia mqs cnt =
   "@media " <> mediaConditionsText mqs <> " { " <> cnt <> " }"
- where
-  mediaConditionsText :: MediaQuery -> Text
-  mediaConditionsText (MediaQuery cons) =
-    T.intercalate " and " $ fmap (\c -> "(" <> c <> ")") cons
-
+  where
+    mediaConditionsText :: MediaQuery -> Text
+    mediaConditionsText (MediaQuery cons) =
+      T.intercalate " and " $ fmap (\c -> "(" <> c <> ")") cons
 
 styleLines :: [Line] -> [Line]
 styleLines [] = []
@@ -150,40 +138,35 @@ styleLines rulesLines =
     <> rulesLines
     <> [Line Newline 0 "</style>"]
 
-
 -- Lines ---------------------------------------
 -- control inline vs newlines and indent
 
 data Line = Line {end :: LineEnd, indent :: Int, text :: Text}
   deriving (Show, Eq)
 
-
 instance IsString Line where
   fromString s = Line Newline 0 (pack s)
-
 
 data LineEnd
   = Newline
   | Inline
   deriving (Eq, Show)
 
-
 addIndent :: Int -> Line -> Line
 addIndent n (Line e ind t) = Line e (ind + n) t
-
 
 -- | Render lines to text
 renderLines :: [Line] -> Text
 renderLines = snd . L.foldl' nextLine (False, "")
- where
-  nextLine :: (Bool, Text) -> Line -> (Bool, Text)
-  nextLine (newline, t) l = (nextNewline l, t <> currentLine newline l)
+  where
+    nextLine :: (Bool, Text) -> Line -> (Bool, Text)
+    nextLine (newline, t) l = (nextNewline l, t <> currentLine newline l)
 
-  currentLine :: Bool -> Line -> Text
-  currentLine newline l
-    | newline = "\n" <> spaces l.indent <> l.text
-    | otherwise = l.text
+    currentLine :: Bool -> Line -> Text
+    currentLine newline l
+      | newline = "\n" <> spaces l.indent <> l.text
+      | otherwise = l.text
 
-  nextNewline l = l.end == Newline
+    nextNewline l = l.end == Newline
 
-  spaces n = T.replicate n " "
+    spaces n = T.replicate n " "
